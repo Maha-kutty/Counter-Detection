@@ -1,0 +1,222 @@
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export interface Contour {
+  points: Point[];
+  area: number;
+  bounds: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+}
+
+export class ContourDetector {
+  private canvas: HTMLCanvasElement;
+  private ctx: CanvasRenderingContext2D;
+
+  constructor() {
+    this.canvas = document.createElement('canvas');
+    this.ctx = this.canvas.getContext('2d', { willReadFrequently: true })!;
+  }
+
+  async processImage(file: File, threshold: number = 128): Promise<{
+    contours: Contour[];
+    processedImage: string;
+    originalImage: string;
+  }> {
+    const img = await this.loadImage(file);
+
+    this.canvas.width = img.width;
+    this.canvas.height = img.height;
+    this.ctx.drawImage(img, 0, 0);
+
+    const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+    const grayData = this.toGrayscale(imageData);
+    const binaryData = this.threshold(grayData, threshold);
+    const contours = this.findContours(binaryData, this.canvas.width, this.canvas.height);
+
+    this.ctx.putImageData(imageData, 0, 0);
+    const originalImage = this.canvas.toDataURL();
+
+    this.drawContours(imageData, contours);
+    this.ctx.putImageData(imageData, 0, 0);
+    const processedImage = this.canvas.toDataURL();
+
+    return { contours, processedImage, originalImage };
+  }
+
+  private loadImage(file: File): Promise<HTMLImageElement> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = URL.createObjectURL(file);
+    });
+  }
+
+  private toGrayscale(imageData: ImageData): Uint8ClampedArray {
+    const gray = new Uint8ClampedArray(imageData.width * imageData.height);
+
+    for (let i = 0; i < imageData.data.length; i += 4) {
+      const r = imageData.data[i];
+      const g = imageData.data[i + 1];
+      const b = imageData.data[i + 2];
+      gray[i / 4] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    }
+
+    return gray;
+  }
+
+  private threshold(grayData: Uint8ClampedArray, threshold: number): Uint8ClampedArray {
+    const binary = new Uint8ClampedArray(grayData.length);
+
+    for (let i = 0; i < grayData.length; i++) {
+      binary[i] = grayData[i] > threshold ? 255 : 0;
+    }
+
+    return binary;
+  }
+
+  private findContours(
+    binaryData: Uint8ClampedArray,
+    width: number,
+    height: number
+  ): Contour[] {
+    const visited = new Uint8ClampedArray(binaryData.length);
+    const contours: Contour[] = [];
+
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const idx = y * width + x;
+
+        if (binaryData[idx] === 0 && !visited[idx]) {
+          const contour = this.traceContour(binaryData, visited, width, height, x, y);
+
+          if (contour.points.length > 20) {
+            contours.push(contour);
+          }
+        }
+      }
+    }
+
+    return contours.sort((a, b) => b.area - a.area).slice(0, 10);
+  }
+
+  private traceContour(
+    binaryData: Uint8ClampedArray,
+    visited: Uint8ClampedArray,
+    width: number,
+    height: number,
+    startX: number,
+    startY: number
+  ): Contour {
+    const points: Point[] = [];
+    const stack: Point[] = [{ x: startX, y: startY }];
+
+    let minX = startX, maxX = startX;
+    let minY = startY, maxY = startY;
+
+    while (stack.length > 0) {
+      const { x, y } = stack.pop()!;
+      const idx = y * width + x;
+
+      if (x < 0 || x >= width || y < 0 || y >= height) continue;
+      if (visited[idx] || binaryData[idx] !== 0) continue;
+
+      visited[idx] = 1;
+
+      const isBoundary =
+        binaryData[(y - 1) * width + x] === 255 ||
+        binaryData[(y + 1) * width + x] === 255 ||
+        binaryData[y * width + (x - 1)] === 255 ||
+        binaryData[y * width + (x + 1)] === 255;
+
+      if (isBoundary) {
+        points.push({ x, y });
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+      }
+
+      stack.push({ x: x - 1, y });
+      stack.push({ x: x + 1, y });
+      stack.push({ x, y: y - 1 });
+      stack.push({ x, y: y + 1 });
+    }
+
+    const area = (maxX - minX) * (maxY - minY);
+
+    return {
+      points,
+      area,
+      bounds: {
+        x: minX,
+        y: minY,
+        width: maxX - minX,
+        height: maxY - minY
+      }
+    };
+  }
+
+  private drawContours(imageData: ImageData, contours: Contour[]): void {
+    const colors = [
+      [255, 0, 0],
+      [0, 255, 0],
+      [0, 0, 255],
+      [255, 255, 0],
+      [255, 0, 255],
+      [0, 255, 255],
+      [255, 128, 0],
+      [128, 0, 255],
+      [0, 255, 128],
+      [255, 128, 128]
+    ];
+
+    contours.forEach((contour, idx) => {
+      const color = colors[idx % colors.length];
+
+      contour.points.forEach(point => {
+        const i = (point.y * imageData.width + point.x) * 4;
+        imageData.data[i] = color[0];
+        imageData.data[i + 1] = color[1];
+        imageData.data[i + 2] = color[2];
+        imageData.data[i + 3] = 255;
+      });
+
+      this.drawBoundingBox(imageData, contour.bounds, color);
+    });
+  }
+
+  private drawBoundingBox(
+    imageData: ImageData,
+    bounds: { x: number; y: number; width: number; height: number },
+    color: number[]
+  ): void {
+    const { x, y, width, height } = bounds;
+
+    for (let i = 0; i < width; i++) {
+      this.setPixel(imageData, x + i, y, color);
+      this.setPixel(imageData, x + i, y + height, color);
+    }
+
+    for (let i = 0; i < height; i++) {
+      this.setPixel(imageData, x, y + i, color);
+      this.setPixel(imageData, x + width, y + i, color);
+    }
+  }
+
+  private setPixel(imageData: ImageData, x: number, y: number, color: number[]): void {
+    if (x < 0 || x >= imageData.width || y < 0 || y >= imageData.height) return;
+
+    const i = (y * imageData.width + x) * 4;
+    imageData.data[i] = color[0];
+    imageData.data[i + 1] = color[1];
+    imageData.data[i + 2] = color[2];
+    imageData.data[i + 3] = 255;
+  }
+}
